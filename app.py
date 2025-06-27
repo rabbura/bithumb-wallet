@@ -182,7 +182,8 @@ with st.sidebar:
                 deposit_data = get_deposit_info(coin_code)
                 if deposit_data:
                     st.session_state.coin_data['data'] = deposit_data
-                    st.session_state.last_update = datetime.now()
+                    KST = timezone(timedelta(hours=9))
+                    st.session_state.last_update = datetime.now(KST)
                 st.rerun()
             
             # 1초마다 화면 업데이트
@@ -281,7 +282,8 @@ else:
                                 'code': coin_code,
                                 'data': deposit_data
                             }
-                            st.session_state.last_update = datetime.now()
+                            KST = timezone(timedelta(hours=9))
+                            st.session_state.last_update = datetime.now(KST)
                             st.session_state.last_refresh_time = time.time()  # 새로고침 타이머 리셋
                             st.rerun()
 
