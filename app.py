@@ -2,7 +2,7 @@ import streamlit as st
 import requests
 import json
 import pandas as pd
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 import time
 
 # 페이지 설정
@@ -140,7 +140,9 @@ with st.sidebar:
                             'code': coin_code,
                             'data': deposit_data
                         }
-                        st.session_state.last_update = datetime.now()
+                        # 한국 시간대 설정
+                        KST = timezone(timedelta(hours=9))
+                        st.session_state.last_update = datetime.now(KST)
                         st.session_state.last_refresh_time = time.time()  # 새로고침 타이머 리셋
                         st.success("✅ 조회 완료!")
                     else:
@@ -207,7 +209,7 @@ if st.session_state.coin_data:
         if st.session_state.last_update:
             st.metric(
                 label="마지막 업데이트",
-                value=st.session_state.last_update.strftime("%H:%M:%S")
+                value=st.session_state.last_update.strftime("%Y-%m-%d %H:%M:%S")
             )
     
     st.markdown("---")
