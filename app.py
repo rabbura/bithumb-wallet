@@ -5,6 +5,9 @@ import pandas as pd
 from datetime import datetime, timezone, timedelta
 import time
 
+# 한국 시간대 설정
+KST = timezone(timedelta(hours=9))
+
 # 페이지 설정
 st.set_page_config(
     page_title="빗썸 핫월렛 잔액 조회",
@@ -140,8 +143,6 @@ with st.sidebar:
                             'code': coin_code,
                             'data': deposit_data
                         }
-                        # 한국 시간대 설정
-                        KST = timezone(timedelta(hours=9))
                         st.session_state.last_update = datetime.now(KST)
                         st.session_state.last_refresh_time = time.time()  # 새로고침 타이머 리셋
                         st.success("✅ 조회 완료!")
@@ -182,7 +183,6 @@ with st.sidebar:
                 deposit_data = get_deposit_info(coin_code)
                 if deposit_data:
                     st.session_state.coin_data['data'] = deposit_data
-                    KST = timezone(timedelta(hours=9))
                     st.session_state.last_update = datetime.now(KST)
                 st.rerun()
             
@@ -282,7 +282,6 @@ else:
                                 'code': coin_code,
                                 'data': deposit_data
                             }
-                            KST = timezone(timedelta(hours=9))
                             st.session_state.last_update = datetime.now(KST)
                             st.session_state.last_refresh_time = time.time()  # 새로고침 타이머 리셋
                             st.rerun()
