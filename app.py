@@ -220,16 +220,42 @@ if st.session_state.coin_data:
     
     col1, col2 = st.columns(2)
     
-    with col1:
-        st.subheader("💰 입금 누적 금액")
-        if 'accumulationDepositAmt' in deposit_data:
-            amount = float(deposit_data['accumulationDepositAmt'])
-            st.metric(
-                label=f"{st.session_state.coin_data['ticker']} 잔액",
-                value=f"{amount:,.8f}".rstrip('0').rstrip('.')
-            )
-        else:
-            st.info("입금 정보가 없습니다.")
+      with col1:
+          st.subheader("💰 입금 누적 금액")
+          if 'accumulationDepositAmt' in deposit_data:
+              amount = float(deposit_data['accumulationDepositAmt'])
+              ticker = st.session_state.coin_data['ticker']
+
+              st.metric(
+                  label=f"{ticker} 잔액",
+                  value=f"{amount:,.8f}".rstrip('0').rstrip('.')
+              )
+
+              # KRW/USD 환산
+              krw_price = get_bithumb_krw_price(ticker)
+              if krw_price:
+                  usd_krw = get_usd_krw_rate()
+                  total_krw = amount * krw_price
+                  total_usd = total_krw / usd_krw
+
+                  sub1, sub2 = st.columns(2)
+                  with sub1:
+                      st.metric(
+                          label="원화 환산",
+                          value=f"₩{total_krw:,.0f}",
+                          help=f"빗썸 시세: {krw_price:,.2f}원"
+                      )
+                  with sub2:
+                      st.metric(
+                          label="달러 환산",
+                          value=f"${total_usd:,.2f}",
+                          help=f"환율: 1 USD = {usd_krw:,.2f}원"
+                      )
+              else:
+                  st.caption(f"⚠️ {ticker}/KRW 시세 조회 실패 (빗썸 미상장
+  가능)")
+          else:
+              st.info("입금 정보가 없습니다.")
     
     with col2:
         st.subheader("📊 추가 정보")
