@@ -150,6 +150,59 @@ def get_overseas_usdt_price(ticker):
     return None, None
 
 
+@st.cache_data(ttl=60)
+def get_dex_price(ticker):
+    """DexScreener 검색 - 심볼 정확 매칭 + 유동성 1순위"""
+    try:
+        url = f"https://api.dexscreener.com/latest/dex/search?q={ticker}"
+        r = requests.get(url, timeout=8)
+        if r.status_code != 200:
+            return None
+        pairs = r.json().get('pairs', []) or []
+        # 심볼이 정확히 일치하는 것만 필터
+        t = ticker.upper()
+        matches = [
+            p for p in pairs
+            if p.get('baseToken', {}).get('symbol', '').upper() == t
+        ]
+        # 최소 유동성 $10K 이상만 (스팸 풀 거름)
+        matches = [
+            p for p in matches
+            if float((p.get('liquidity') or {}).get('usd') or 0) > 10000
+        ]
+        if not matches:
+            return None
+        # 유동성 큰 순 정렬
+        matches.sort(
+            key=lambda p: float((p.get('liquidity') or {}).get('usd') or 0),
+            reverse=True
+        )
+        top = matches[0]
+        price = float(top.get('priceUsd', 0))
+        if price <= 0:
+            return None
+        return {
+            'price': price,
+            'chain': top.get('chainId', '?'),
+            'dex': top.get('dexId', '?'),
+            'pair': f"{top['baseToken']['symbol']}/{top['quoteToken']['symbol']}",
+            'liquidity_usd': float((top.get('liquidity') or {}).get('usd') or 0),
+        }
+    except Exception:
+        return None
+
+
+def format_krw_short(amount):
+    """원화 단위 축약: 조 / 억 / 만"""
+    if amount >= 1e12:
+        return f"₩{amount/1e12:,.2f}조"
+    if amount >= 1e8:
+        return f"₩{amount/1e8:,.2f}억"
+    if amount >= 1e4:
+        return f"₩{amount/1e4:,.0f}만"
+    return f"₩{amount:,.0f}"
+
+
 @st.cache_data(ttl=30)
 def get_usdt_krw_price():
     """USDT/KRW 환율 (업비트 → 빗썸)"""
@@ -292,20 +345,43 @@ if st.session_state.coin_data:
             usdt_price, usdt_source = get_overseas_usdt_price(ticker)
             usdt_krw, usdt_krw_source = get_usdt_krw_price()
 
+            price_usd = None
+            price_label = None
+            extra_caption = None
+
             if usdt_price:
-                total_usd = amount * usdt_price
+                price_usd = usdt_price
+                price_label = f"{usdt_source} {ticker}/USDT"
+            else:
+                # 폴백: DexScreener
+                dex = get_dex_price(ticker)
+                if dex:
+                    price_usd = dex['price']
+                    price_label = f"DEX {dex['dex']} ({dex['chain']}) {dex['pair']}"
+                    extra_caption = f"💧 풀 유동성: ${dex['liquidity_usd']:,.0f}"
+
+            if price_usd:
+                total_usd = amount * price_usd
                 total_krw = total_usd * usdt_krw
 
                 sub1, sub2 = st.columns(2)
                 with sub1:
-                    st.metric(label="원화 환산", value=f"₩{total_krw:,.0f}")
-                    st.caption(f"💱 {usdt_source} {ticker}/USDT: ${usdt_price:,.6f}")
+                    st.metric(label="원화 환산", value=format_krw_short(total_krw))
+                    st.caption(f"💵 정확: ₩{total_krw:,.0f}")
+                    st.caption(f"💱 {price_label}: ${price_usd:,.6f}")
                     st.caption(f"💱 {usdt_krw_source} USDT/KRW: ₩{usdt_krw:,.2f}")
+                    if extra_caption:
+                        st.caption(extra_caption)
                 with sub2:
                     st.metric(label="달러 환산", value=f"${total_usd:,.2f}")
-                    st.caption(f"💱 {usdt_source} {ticker}/USDT: ${usdt_price:,.6f}")
+                    st.caption(f"💱 {price_label}: ${price_usd:,.6f}")
+                    if extra_caption:
+                        st.caption(extra_caption)
             else:
-                st.warning(f"⚠️ {ticker}/USDT 시세 없음 (Binance/Bybit/OKX/Gate/MEXC 모두 미상장)")
+                st.warning(
+                    f"⚠️ {ticker} 시세 없음 "
+                    f"(CEX 5곳 + DexScreener 모두 매칭 실패)"
+                )
         else:
             st.info("입금 정보가 없습니다.")
 
@@ -356,5 +432,6 @@ else:
                             st.rerun()
 
 st.markdown("---")
-st.caption("💡 빗썸 입금 누적 데이터 + 해외 거래소(Binance/Bybit/OKX/Gate/MEXC) USDT 시세")
+st.caption("💡 빗썸 입금 누적 데이터 + CEX(Binance/Bybit/OKX/Gate/MEXC) USDT 시세 + DexScreener DEX 폴백")
 st.caption("⚠️ 정보는 참고용이며, 정확한 정보는 각 거래소 공식 사이트 확인.")
+
