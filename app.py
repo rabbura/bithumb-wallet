@@ -67,29 +67,117 @@ def get_deposit_info(coin_code):
         return None
 
 
-@st.cache_data(ttl=60)
-def get_bithumb_krw_price(ticker):
+@st.cache_data(ttl=30)
+def get_overseas_usdt_price(ticker):
+    """해외 거래소 USDT 가격 (Binance → Bybit → OKX → Gate → MEXC)"""
+    t = ticker.upper()
+
+    # 1. Binance
     try:
-        url = f"https://api.bithumb.com/public/ticker/{ticker}_KRW"
-        r = requests.get(url, timeout=5)
+        r = requests.get(
+            f"https://api.binance.com/api/v3/ticker/price?symbol={t}USDT",
+            timeout=5
+        )
+        if r.status_code == 200:
+            p = float(r.json().get('price', 0))
+            if p > 0:
+                return p, "Binance"
+    except Exception:
+        pass
+
+    # 2. Bybit
+    try:
+        r = requests.get(
+            f"https://api.bybit.com/v5/market/tickers?category=spot&symbol={t}USDT",
+            timeout=5
+        )
+        if r.status_code == 200:
+            data = r.json()
+            if data.get('retCode') == 0:
+                lst = data.get('result', {}).get('list', [])
+                if lst:
+                    p = float(lst[0].get('lastPrice', 0))
+                    if p > 0:
+                        return p, "Bybit"
+    except Exception:
+        pass
+
+    # 3. OKX
+    try:
+        r = requests.get(
+            f"https://www.okx.com/api/v5/market/ticker?instId={t}-USDT",
+            timeout=5
+        )
+        if r.status_code == 200:
+            data = r.json()
+            if data.get('code') == '0':
+                d = data.get('data', [])
+                if d:
+                    p = float(d[0].get('last', 0))
+                    if p > 0:
+                        return p, "OKX"
+    except Exception:
+        pass
+
+    # 4. Gate.io
+    try:
+        r = requests.get(
+            f"https://api.gateio.ws/api/v4/spot/tickers?currency_pair={t}_USDT",
+            timeout=5
+        )
+        if r.status_code == 200:
+            data = r.json()
+            if data and len(data) > 0:
+                p = float(data[0].get('last', 0))
+                if p > 0:
+                    return p, "Gate.io"
+    except Exception:
+        pass
+
+    # 5. MEXC
+    try:
+        r = requests.get(
+            f"https://api.mexc.com/api/v3/ticker/price?symbol={t}USDT",
+            timeout=5
+        )
+        if r.status_code == 200:
+            p = float(r.json().get('price', 0))
+            if p > 0:
+                return p, "MEXC"
+    except Exception:
+        pass
+
+    return None, None
+
+
+@st.cache_data(ttl=30)
+def get_usdt_krw_price():
+    """USDT/KRW 환율 (업비트 → 빗썸)"""
+    try:
+        r = requests.get(
+            "https://api.upbit.com/v1/ticker?markets=KRW-USDT",
+            timeout=5
+        )
+        if r.status_code == 200:
+            data = r.json()
+            if data and len(data) > 0:
+                return float(data[0]['trade_price']), "업비트"
+    except Exception:
+        pass
+
+    try:
+        r = requests.get(
+            "https://api.bithumb.com/public/ticker/USDT_KRW",
+            timeout=5
+        )
         if r.status_code == 200:
             data = r.json()
             if data.get('status') == '0000':
-                return float(data['data']['closing_price'])
+                return float(data['data']['closing_price']), "빗썸"
     except Exception:
         pass
-    return None
 
-
-@st.cache_data(ttl=300)
-def get_usd_krw_rate():
-    try:
-        r = requests.get("https://open.er-api.com/v6/latest/USD", timeout=5)
-        if r.status_code == 200:
-            return float(r.json()['rates']['KRW'])
-    except Exception:
-        pass
-    return 1380.0
+    return 1380.0, "폴백"
 
 
 with st.sidebar:
@@ -201,27 +289,23 @@ if st.session_state.coin_data:
                 value=f"{amount:,.8f}".rstrip('0').rstrip('.')
             )
 
-            krw_price = get_bithumb_krw_price(ticker)
-            if krw_price:
-                usd_krw = get_usd_krw_rate()
-                total_krw = amount * krw_price
-                total_usd = total_krw / usd_krw
+            usdt_price, usdt_source = get_overseas_usdt_price(ticker)
+            usdt_krw, usdt_krw_source = get_usdt_krw_price()
+
+            if usdt_price:
+                total_usd = amount * usdt_price
+                total_krw = total_usd * usdt_krw
 
                 sub1, sub2 = st.columns(2)
                 with sub1:
-                    st.metric(
-                        label="원화 환산",
-                        value=f"₩{total_krw:,.0f}",
-                        help=f"빗썸 시세: {krw_price:,.2f}원"
-                    )
+                    st.metric(label="원화 환산", value=f"₩{total_krw:,.0f}")
+                    st.caption(f"💱 {usdt_source} {ticker}/USDT: ${usdt_price:,.6f}")
+                    st.caption(f"💱 {usdt_krw_source} USDT/KRW: ₩{usdt_krw:,.2f}")
                 with sub2:
-                    st.metric(
-                        label="달러 환산",
-                        value=f"${total_usd:,.2f}",
-                        help=f"환율: 1 USD = {usd_krw:,.2f}원"
-                    )
+                    st.metric(label="달러 환산", value=f"${total_usd:,.2f}")
+                    st.caption(f"💱 {usdt_source} {ticker}/USDT: ${usdt_price:,.6f}")
             else:
-                st.caption(f"⚠️ {ticker}/KRW 시세 조회 실패")
+                st.warning(f"⚠️ {ticker}/USDT 시세 없음 (Binance/Bybit/OKX/Gate/MEXC 모두 미상장)")
         else:
             st.info("입금 정보가 없습니다.")
 
@@ -272,5 +356,5 @@ else:
                             st.rerun()
 
 st.markdown("---")
-st.caption("💡 빗썸 공개 API를 활용하여 핫월렛 잔액을 조회합니다.")
-st.caption("⚠️ 정보는 참고용이며, 정확한 정보는 빗썸 공식 사이트 확인.")
+st.caption("💡 빗썸 입금 누적 데이터 + 해외 거래소(Binance/Bybit/OKX/Gate/MEXC) USDT 시세")
+st.caption("⚠️ 정보는 참고용이며, 정확한 정보는 각 거래소 공식 사이트 확인.")
