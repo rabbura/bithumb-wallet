@@ -237,32 +237,80 @@ def get_usdt_krw_price():
 # =====================================================================
 # 왜 필요한가
 #   위의 빗썸 공개 '입금 누적'(accumulationDepositAmt)은 실측해 보면
-#   '금고 현재 잔고(들어온 것 − 나간 것)'와 같고, 10분쯤마다 바뀐다.
-#   금고(입금이 모이는 지갑)를 블록체인에서 직접 보면
-#   총 입금량 · 입금한 지갑 수 · 시간대별 유입을 바로바로 볼 수 있다.
+#   '빗썸 지갑들의 현재 잔고 합(들어온 것 − 나간 것)'과 같고, 10분쯤마다 바뀐다.
+#   (PONS: 금고 하나 = 공개 숫자 -0.0% / ESP: 집금 + 출금핫 합 = -1.3% / ENA -1.2%)
+#   빗썸 지갑을 블록체인에서 직접 보면 총 입금량 · 입금한 지갑 수 · 시간대별 유입을
+#   바로바로 볼 수 있다.
 #
-# 금고를 찾는 법 (가스지갑 확인)
-#   빗썸 입금주소는 코인을 금고로 보내려면 가스비가 필요하다. 그 가스비를
-#   늘 같은 지갑(아래 gas_feeders)이 넣어준다. 그래서
-#     "가스지갑에게 가스를 받은 주소들이 코인을 보낸 곳" = 빗썸 금고 다.
+# 빗썸 지갑을 찾는 법 (EVM 체인 전부)
+#   ① 주소록: 상장추적기·복제핫·현선봇이 모은 빗썸 지갑 목록(bithumb_wallets.json)에서
+#      이 코인을 들고 있는 지갑을 전부 찾아 더한다.
+#   ② 주소록에 없는 새 금고(신규 상장): 최근 여러 지갑이 코인을 보낸 일반지갑(EOA)을
+#      후보로 뽑고, 아래 중 하나로 확인한다.
+#        - 그 후보 잔고를 더하면 빗썸 공개 숫자와 맞는다 (모든 EVM 체인)
+#        - 입금주소가 빗썸 가스지갑에게 가스를 받았다 (가스지갑을 아는 체인)
 #
-# ⚠️ 개인 입금주소는 화면에 절대 띄우지 않는다(다른 사람 지갑이다). 금고 주소만 보여준다.
+# ⚠️ 개인 입금주소는 화면에 절대 띄우지 않는다(다른 사람 지갑이다). 빗썸 지갑만 보여준다.
 import concurrent.futures
+import os
 
+TENDERLY = "https://{}.gateway.tenderly.co"
 ONCHAIN_CHAINS = {
     # 빗썸 입금망 이름(net_type) → 체인 설정
-    "ROBINHOOD": {
-        "name": "Robinhood Chain",
-        "cg": "robinhood",                       # 코인게코 플랫폼 id
-        "rpcs": ["https://rpc.mainnet.chain.robinhood.com",
-                 "https://rpc.ordofi.network"],
-        "explorer": "https://robin.etherscan.io",
-        "gas_feeders": ["0xf4fe70cdf6a46b3684676902cc84f9e74c425e3e"],
-        # getLogs 한 번에 볼 블록 수 (노드 상한: topic 값 여러 개 10만 / 하나 200만, 결과 1만 건)
-        "chunk": 1_500_000,
-    },
+    #   logs : getLogs 용 RPC (앞에서부터 시도) / bal : 잔고를 한 번에 여러 개 묻는 용
+    #   chunk: getLogs 한 번에 볼 블록 수 (거절되면 자동으로 반씩 줄인다)
+    #   sweep_feeders: 입금 한 건마다 가스를 넣어주는 빗썸 가스지갑 (금고 확인에 쓴다)
+    #   ※ 2026.10.09 실측: 텐더리 공개 노드가 이더·아비·옵·폴리곤·아발란체를 넓게 받아준다.
+    #     베이스(1천 블록)·BSC(5천 블록)는 좁아서 기간이 길면 '실제 N시간'까지만 읽힌다.
+    "ETH": {"book": "ethereum", "name": "Ethereum", "cg": ["ethereum"], "sec": 12,
+            "logs": [TENDERLY.format("mainnet"), "https://gateway.tenderly.co/public/mainnet",
+                     "https://rpc.mevblocker.io", "https://ethereum-rpc.publicnode.com"],
+            "bal": ["https://rpc.mevblocker.io", "https://ethereum-rpc.publicnode.com"],
+            "explorer": "https://etherscan.io", "chunk": 50_000},
+    "BSC": {"book": "binance-smart-chain", "name": "BNB Chain", "cg": ["binance-smart-chain"],
+            "sec": 0.75,
+            "logs": ["https://bsc-rpc.publicnode.com", "https://bsc.rpc.blxrbdn.com"],
+            "bal": ["https://bsc-rpc.publicnode.com", "https://bsc.rpc.blxrbdn.com"],
+            "explorer": "https://bscscan.com", "chunk": 5_000},
+    "BASE_ETH": {"book": "base", "name": "Base", "cg": ["base"], "sec": 2,
+                 # 텐더리는 1천 블록씩이지만 옛 구간도 준다(공개노드는 최근만) → 텐더리 먼저
+                 "logs": [TENDERLY.format("base"), "https://base-rpc.publicnode.com"],
+                 "bal": ["https://base-rpc.publicnode.com", "https://mainnet.base.org"],
+                 "explorer": "https://basescan.org", "chunk": 1_000},
+    "ARB_ETH": {"book": "arbitrum-one", "name": "Arbitrum", "cg": ["arbitrum-one"], "sec": 0.25,
+                "logs": ["https://arb1.arbitrum.io/rpc", TENDERLY.format("arbitrum")],
+                "bal": ["https://arbitrum-one.public.blastapi.io", "https://arb1.arbitrum.io/rpc"],
+                "explorer": "https://arbiscan.io", "chunk": 100_000},
+    "OP_ETH": {"book": "optimistic-ethereum", "name": "Optimism", "cg": ["optimistic-ethereum"],
+               "sec": 2,
+               "logs": [TENDERLY.format("optimism"), "https://mainnet.optimism.io"],
+               "bal": ["https://optimism-rpc.publicnode.com", "https://mainnet.optimism.io"],
+               "explorer": "https://optimistic.etherscan.io", "chunk": 50_000},
+    "POLYGON": {"book": "polygon-pos", "name": "Polygon", "cg": ["polygon-pos"], "sec": 2,
+                "logs": [TENDERLY.format("polygon"), "https://polygon-bor-rpc.publicnode.com"],
+                "bal": ["https://polygon-bor-rpc.publicnode.com", TENDERLY.format("polygon")],
+                "explorer": "https://polygonscan.com", "chunk": 50_000},
+    "AVAX": {"book": "avalanche", "name": "Avalanche C", "cg": ["avalanche"], "sec": 1,
+             "logs": [TENDERLY.format("avalanche"),
+                      "https://avalanche-c-chain-rpc.publicnode.com"],
+             "bal": ["https://avalanche-c-chain-rpc.publicnode.com"],
+             "explorer": "https://snowtrace.io", "chunk": 50_000},
+    "KAIA": {"book": "kaia", "name": "Kaia", "cg": ["kaia", "klay-token"], "sec": 1,
+             "logs": ["https://public-en.node.kaia.io"],
+             "bal": ["https://public-en.node.kaia.io"],
+             "explorer": "https://kaiascan.io", "chunk": 10_000},
+    "ROBINHOOD": {"book": "robinhood", "name": "Robinhood Chain", "cg": ["robinhood"], "sec": 0.1,
+                  "logs": ["https://rpc.mainnet.chain.robinhood.com", "https://rpc.ordofi.network"],
+                  "bal": ["https://rpc.mainnet.chain.robinhood.com", "https://rpc.ordofi.network"],
+                  "explorer": "https://robin.etherscan.io", "chunk": 1_500_000,
+                  "sweep_feeders": ["0xf4fe70cdf6a46b3684676902cc84f9e74c425e3e"]},
 }
-# 이미 찾아둔 금고·컨트랙트 (찾는 시간을 아낀다. 없으면 자동으로 찾는다)
+# 빗썸이 같은 망을 다른 이름으로 부를 때
+NET_ALIASES = {"ERC20": "ETH", "BEP20": "BSC", "BNB": "BSC", "BASE": "BASE_ETH",
+               "ARB": "ARB_ETH", "ARBITRUM": "ARB_ETH", "OP": "OP_ETH", "OPTIMISM": "OP_ETH",
+               "POL": "POLYGON", "MATIC": "POLYGON", "AVAX_C": "AVAX", "AVAXC": "AVAX",
+               "KLAY": "KAIA"}
+# 이미 찾아둔 금고·컨트랙트 (주소록에 아직 없을 때 여기 한 줄 넣으면 바로 뜬다)
 KNOWN_VAULTS = {
     ("ROBINHOOD", "PONS"): "0xcaad7987d6cbb1519a4629fa48d02262506e9850",
     ("ROBINHOOD", "CASHCAT"): "0x7a41ea709a89b2a5e7c6b1f52ab305349140af60",
@@ -273,28 +321,46 @@ KNOWN_CONTRACTS = {
 }
 TRANSFER_TOPIC = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
 ZERO_ADDR = "0x" + "0" * 40
+MATCH_PCT = 5.0          # 공개 숫자와 이만큼(%) 안이면 '맞다'
+MAX_FLOW_WALLETS = 20    # 입출금 기록을 볼 빗썸 지갑 수 상한 (잔고 큰 순)
 
 
 def _rpc_post(rpcs, payload):
-    """RPC 목록을 순서대로 시도. 응답(JSON)을 그대로 돌려준다."""
+    """RPC 목록을 순서대로 시도. 정상 응답(JSON)을 그대로 돌려준다.
+    배치(목록)를 보냈는데 오류 하나로 돌려주는 곳(배치 미지원)은 건너뛴다."""
     last = None
     for url in rpcs:
         try:
             r = requests.post(url, json=payload, timeout=25,
                               headers={'User-Agent': 'Mozilla/5.0'})
-            if r.status_code == 200:
-                return r.json()
-            last = f"HTTP {r.status_code}"
+            if r.status_code != 200:
+                last = f"HTTP {r.status_code}"
+                continue
+            res = r.json()
+            if isinstance(payload, list) and not isinstance(res, list):
+                last = str((res or {}).get("error", "배치 거부"))[:80]
+                continue
+            return res
         except Exception as e:
-            last = str(e)
+            last = str(e)[:80]
     raise RuntimeError(f"RPC 연결 실패: {last}")
 
 
 def _rpc_call(rpcs, method, params):
-    res = _rpc_post(rpcs, {"jsonrpc": "2.0", "id": 1, "method": method, "params": params})
-    if isinstance(res, dict) and res.get("error"):
-        raise RuntimeError(res["error"].get("message", "RPC 오류"))
-    return res.get("result") if isinstance(res, dict) else None
+    """오류가 오면 다음 RPC로 넘어간다 (노드마다 허용 범위가 다르다)."""
+    last = None
+    for url in rpcs:
+        try:
+            res = _rpc_post([url], {"jsonrpc": "2.0", "id": 1, "method": method,
+                                    "params": params})
+        except RuntimeError as e:
+            last = str(e)
+            continue
+        if isinstance(res, dict) and res.get("error"):
+            last = str(res["error"].get("message", "RPC 오류"))[:100]
+            continue
+        return res.get("result") if isinstance(res, dict) else None
+    raise RuntimeError(last or "RPC 오류")
 
 
 def _hexint(v):
@@ -309,30 +375,30 @@ def _topic_addr(a):
 
 
 def _get_logs(rpcs, address, topics, lo, hi, chunk, deadline):
-    """구간을 나눠 getLogs. '너무 많다' 고 거절당하면 구간을 반으로 줄여 다시 읽는다."""
-    out, start, step = [], lo, chunk
-    while start <= hi:
+    """최신 블록부터 거꾸로 나눠 읽는다 → (로그, 실제로 읽은 첫 블록).
+    '너무 넓다'고 거절당하면 구간을 반으로 줄이고, 시간이 다 되거나 노드가 옛 구간을
+    안 주면(아카이브 제한) 거기까지만 돌려준다 — 화면에 '실제 N시간'으로 정직하게 표시."""
+    out, end, step = [], hi, chunk
+    while end >= lo:
         if time.time() > deadline:
-            raise RuntimeError("조회 시간 초과 (구간을 줄여 보세요)")
-        end = min(hi, start + step - 1)
+            return out, end + 1
+        start = max(lo, end - step + 1)
         flt = {"address": address, "topics": topics,
                "fromBlock": hex(start), "toBlock": hex(end)}
         try:
             out.extend(_rpc_call(rpcs, "eth_getLogs", [flt]) or [])
         except RuntimeError:
-            if step > 500:
-                step //= 2
+            if step > 200:
+                step = max(200, step // 2)
                 continue
-            raise
-        start = end + 1
-        if step < chunk:
-            step = min(chunk, step * 2)
-    return out
+            return out, end + 1
+        end = start - 1
+    return out, lo
 
 
 @st.cache_data(ttl=300)
 def bithumb_networks(ticker):
-    """빗썸 입금망 목록 (예: ['ROBINHOOD'])"""
+    """빗썸 입금망 목록 (예: ['ETH'])"""
     try:
         r = requests.get(
             f"https://api.bithumb.com/public/assetsstatus/multichain/{ticker.upper()}",
@@ -344,23 +410,58 @@ def bithumb_networks(ticker):
     return []
 
 
+def _chains_of(nets):
+    """빗썸 입금망 중 지원하는 EVM 체인들 (WLD 처럼 이더+옵티미즘 등 여러 망으로 받는 코인이 있다)"""
+    out = []
+    for n in nets:
+        k = NET_ALIASES.get(n, n)
+        if k in ONCHAIN_CHAINS and k not in out:
+            out.append(k)
+    return out
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def _load_book_raw():
+    p = os.path.join(os.path.dirname(os.path.abspath(__file__)), "bithumb_wallets.json")
+    try:
+        with open(p, encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def load_book():
+    """빗썸 지갑 주소록 (app.py 옆 bithumb_wallets.json) → (체인별 [주소, 라벨, 콜드], 기준시각).
+    파일이 없으면 빈 목록 — 그래도 새 금고 찾기는 돈다."""
+    d = _load_book_raw()
+    return d.get("chains", {}), d.get("_at", "")
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def other_exchange_wallets(book_chain):
+    """주소록의 다른 거래소 지갑 (새 금고 후보에서 뺀다 — 업비트 집금지갑을 빗썸으로 잡는 오탐 방지)"""
+    s = (_load_book_raw().get("others") or {}).get(book_chain, "")
+    return frozenset("0x" + s[i:i + 40] for i in range(0, len(s), 40))
+
+
 @st.cache_data(ttl=600)
 def chain_clock(chain_key):
-    """(최신 블록, 그 시각, 블록당 초)"""
-    rpcs = ONCHAIN_CHAINS[chain_key]["rpcs"]
-    tip = _hexint(_rpc_call(rpcs, "eth_blockNumber", []))
-    span = 50_000
-    b1 = _rpc_call(rpcs, "eth_getBlockByNumber", [hex(tip), False])
-    b0 = _rpc_call(rpcs, "eth_getBlockByNumber", [hex(tip - span), False])
-    t1, t0 = _hexint(b1["timestamp"]), _hexint(b0["timestamp"])
-    return tip, t1, max((t1 - t0) / span, 0.01)
+    """블록당 초 (최근 블록들로 잰다. 못 재면 설정값)"""
+    cfg = ONCHAIN_CHAINS[chain_key]
+    try:
+        tip = _hexint(_rpc_call(cfg["bal"], "eth_blockNumber", []))
+        span = min(50_000, tip - 1)
+        b1 = _rpc_call(cfg["bal"], "eth_getBlockByNumber", [hex(tip), False])
+        b0 = _rpc_call(cfg["bal"], "eth_getBlockByNumber", [hex(tip - span), False])
+        return max((_hexint(b1["timestamp"]) - _hexint(b0["timestamp"])) / span, 0.01)
+    except Exception:
+        return cfg["sec"]
 
 
 def _tip_now(chain_key):
-    """블록 간격은 캐시를 쓰고, 최신 블록만 새로 묻는다."""
-    _, _, sec = chain_clock(chain_key)
-    rpcs = ONCHAIN_CHAINS[chain_key]["rpcs"]
-    tip = _hexint(_rpc_call(rpcs, "eth_blockNumber", []))
+    """(최신 블록, 지금 시각, 블록당 초)"""
+    sec = chain_clock(chain_key)
+    tip = _hexint(_rpc_call(ONCHAIN_CHAINS[chain_key]["bal"], "eth_blockNumber", []))
     return tip, time.time(), sec
 
 
@@ -377,34 +478,96 @@ def _token_symbol(rpcs, contract):
 
 
 @st.cache_data(ttl=3600)
+def token_decimals(chain_key, contract):
+    rpcs = ONCHAIN_CHAINS[chain_key]["bal"]
+    return _hexint(_rpc_call(rpcs, "eth_call", [{"to": contract, "data": "0x313ce567"},
+                                                "latest"])) or 18
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def cg_platforms(ticker):
+    """코인게코에서 심볼이 같은 코인들의 체인별 주소 목록.
+    실패(429 등)는 예외로 올려서 캐시에 안 남긴다 — 실패를 1시간 기억하면 그동안 못 쓴다."""
+    r = requests.get("https://api.coingecko.com/api/v3/search", params={"query": ticker},
+                     timeout=8)
+    if r.status_code != 200:
+        raise RuntimeError(f"코인게코 응답 {r.status_code} (잠시 뒤 다시)")
+    out = []
+    for c in (r.json().get("coins") or [])[:5]:
+        if (c.get("symbol") or "").upper() != ticker:
+            continue
+        d = requests.get(f"https://api.coingecko.com/api/v3/coins/{c['id']}",
+                         params={"localization": "false", "tickers": "false",
+                                 "market_data": "false", "community_data": "false",
+                                 "developer_data": "false"}, timeout=8)
+        if d.status_code != 200:
+            raise RuntimeError(f"코인게코 응답 {d.status_code} (잠시 뒤 다시)")
+        out.append(d.json().get("platforms") or {})
+    return out
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
 def token_contract(chain_key, ticker):
-    """코인게코에서 그 체인의 컨트랙트를 찾고, 온체인 심볼로 한 번 더 확인한다.
-    (티커가 같은 가짜 토큰이 검색 1위로 나오는 경우가 있다)"""
+    """그 체인의 토큰 컨트랙트. 코인게코 주소를 온체인 심볼로 한 번 더 확인한다
+    (티커가 같은 가짜 토큰이 검색 1위로 나오는 경우가 있다). 못 찾으면 None."""
     t = ticker.upper()
     if (chain_key, t) in KNOWN_CONTRACTS:
-        return KNOWN_CONTRACTS[(chain_key, t)], "등록값"
+        return KNOWN_CONTRACTS[(chain_key, t)]
     cfg = ONCHAIN_CHAINS[chain_key]
-    try:
-        r = requests.get("https://api.coingecko.com/api/v3/search",
-                         params={"query": t}, timeout=8)
-        for c in (r.json().get("coins") or [])[:5]:
-            if (c.get("symbol") or "").upper() != t:
-                continue
-            d = requests.get(
-                f"https://api.coingecko.com/api/v3/coins/{c['id']}",
-                params={"localization": "false", "tickers": "false",
-                        "market_data": "false", "community_data": "false",
-                        "developer_data": "false"}, timeout=8).json()
-            addr = ((d.get("platforms") or {}).get(cfg["cg"]) or "").lower()
-            if addr.startswith("0x") and _token_symbol(cfg["rpcs"], addr).upper() == t:
-                return addr, "코인게코+온체인 심볼 확인"
-    except Exception:
-        pass
-    return None, "못 찾음"
+    for plats in cg_platforms(t):
+        for pid in cfg["cg"]:
+            addr = (plats.get(pid) or "").lower()
+            if addr.startswith("0x") and _token_symbol(cfg["bal"], addr).upper() == t:
+                return addr
+    return None
+
+
+def _balances(rpcs, contract, addrs, batch=100):
+    """balanceOf 를 한 번에 여러 개. 빠진 것은 RPC 순서를 바꿔 한 번 더 묻는다."""
+    out, todo = {}, list(addrs)
+    for order in (rpcs, list(reversed(rpcs))):
+        miss = []
+        for i in range(0, len(todo), batch):
+            part = todo[i:i + batch]
+            try:
+                res = _rpc_post(order, [{"jsonrpc": "2.0", "id": j, "method": "eth_call",
+                                         "params": [{"to": contract, "data": "0x70a08231"
+                                                     + _topic_addr(a)[2:]}, "latest"]}
+                                        for j, a in enumerate(part)])
+            except RuntimeError:
+                res = []
+            got = set()
+            for x in res:
+                j = x.get("id") if isinstance(x, dict) else None
+                if isinstance(j, int) and 0 <= j < len(part) and "result" in x:
+                    out[part[j]] = _hexint(x["result"])
+                    got.add(j)
+            miss += [a for j, a in enumerate(part) if j not in got]
+        todo = miss
+        if not todo:
+            break
+    return out, len(todo)
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def book_holders(chain_key, contract, extra=()):
+    """주소록의 빗썸 지갑 중 이 코인을 가진 곳 → ([(주소, 라벨, 콜드, 수량)], 조회 수, 못 읽은 수)"""
+    cfg = ONCHAIN_CHAINS[chain_key]
+    book, _ = load_book()
+    rows = {a: (lab, cold) for a, lab, cold in book.get(cfg["book"], [])}
+    for a in extra:
+        rows.setdefault(a.lower(), ("등록/직접 입력 금고", False))
+    if not rows:
+        return [], 0, 0
+    scale = 10 ** token_decimals(chain_key, contract)
+    bals, miss = _balances(cfg["bal"], contract, list(rows))
+    out = [(a, rows[a][0], rows[a][1], v / scale) for a, v in bals.items() if v > 0]
+    out.sort(key=lambda r: -r[3])
+    return out, len(rows), miss
 
 
 def _is_eoa(rpcs, addrs):
-    """금고는 사람이 서명하는 일반 지갑(EOA)이다. DEX 풀·라우터(컨트랙트)를 걸러낸다."""
+    """빗썸 지갑은 사람이 서명하는 일반 지갑(EOA)이다. DEX 풀·라우터(컨트랙트)를 걸러낸다."""
     if not addrs:
         return {}
     res = _rpc_post(rpcs, [{"jsonrpc": "2.0", "id": i, "method": "eth_getCode",
@@ -414,7 +577,7 @@ def _is_eoa(rpcs, addrs):
 
 
 def _gas_funded(rpcs, feeders, addr, sweep_block, back=500):
-    """addr 이 sweep_block 직전에 가스지갑에게 가스를 받았나 (보통 300블록 전)."""
+    """addr 이 sweep_block 직전에 가스지갑에게 가스를 받았나 (로빈후드: 보통 300블록 전)."""
     top, lo = sweep_block, max(0, sweep_block - back)
     while top >= lo:
         bot = max(lo, top - 99)
@@ -430,14 +593,18 @@ def _gas_funded(rpcs, feeders, addr, sweep_block, back=500):
 
 
 @st.cache_data(ttl=300, show_spinner=False)
-def find_vault(chain_key, contract, hours):
-    """빗썸 금고 찾기 → (금고주소 또는 None, 설명)"""
+def fanin_candidates(chain_key, contract, hours, skip=()):
+    """최근 hours 동안 여러 지갑이 코인을 보낸 일반지갑(EOA) 후보.
+    → ([{addr, senders, bal, gas}], 실제로 본 시간)
+       gas: True=빗썸 가스지갑 확인 / None=가스지갑 모르는 체인(잔고로 확인)"""
     cfg = ONCHAIN_CHAINS[chain_key]
-    rpcs, feeders = cfg["rpcs"], set(cfg["gas_feeders"])
+    feeders = set(cfg.get("sweep_feeders") or [])
+    others = other_exchange_wallets(cfg["book"])
     tip, _, sec = _tip_now(chain_key)
     lo = max(0, tip - int(hours * 3600 / sec))
-    logs = _get_logs(rpcs, contract, [TRANSFER_TOPIC], lo, tip, cfg["chunk"],
-                     deadline=time.time() + 120)
+    logs, got_lo = _get_logs(cfg["logs"], contract, [TRANSFER_TOPIC], lo, tip, cfg["chunk"],
+                             deadline=time.time() + 40)
+    seen_h = (tip - got_lo) * sec / 3600
     senders, first = {}, {}
     for lg in logs:
         try:
@@ -445,7 +612,7 @@ def find_vault(chain_key, contract, hours):
             to = "0x" + lg["topics"][2][-40:]
         except Exception:
             continue
-        if frm == ZERO_ADDR or to == ZERO_ADDR:
+        if frm == ZERO_ADDR or to == ZERO_ADDR or to in skip or to in others:
             continue
         senders.setdefault(to, set()).add(frm)
         k = (frm, to)
@@ -455,62 +622,73 @@ def find_vault(chain_key, contract, hours):
     # ⚠️ 거래가 많은 코인은 위쪽을 DEX 풀·라우터(컨트랙트)가 다 차지한다
     #    (PONS 12시간: 이동 9.7만 건, 상위 12곳 중 10곳이 컨트랙트). 넉넉히 40곳을 본다.
     rank = sorted(senders.items(), key=lambda x: -len(x[1]))[:40]
-    eoa = _is_eoa(rpcs, [a for a, _ in rank])
-    cands = [(a, s) for a, s in rank if eoa.get(a) and len(s) >= 3][:4]
+    eoa = _is_eoa(cfg["bal"], [a for a, _ in rank])
+    cands = [(a, s) for a, s in rank if eoa.get(a) and len(s) >= 3][:6]
     if not cands:
-        return None, f"최근 {hours}시간 동안 여러 지갑이 모이는 곳이 없다 (아직 입금 전일 수 있음)"
-    # 후보를 하나씩: 입금지갑 4곳을 고르게 뽑아(처음·중간·끝) 동시에 가스지갑 확인.
-    # 하나라도 맞으면 거기서 멈춘다(빗썸 가스지갑은 빗썸 입금주소에만 가스를 준다).
-    for cand, ss in cands:
-        order = sorted(ss, key=lambda s: first.get((s, cand), 0))
-        pick = sorted({order[int(i * (len(order) - 1) / 3)] for i in range(4)})
-        with concurrent.futures.ThreadPoolExecutor(max_workers=4) as ex:
-            ok = list(ex.map(lambda s: _gas_funded(rpcs, feeders, s, first[(s, cand)]), pick))
-        if any(ok):
-            return cand, (f"가스지갑 확인 {sum(ok)}/{len(pick)} · "
-                          f"입금지갑 {len(ss)}곳이 이 금고로 보냄")
-    return None, (f"후보 {len(cands)}곳 모두 빗썸 가스지갑 확인 실패 "
-                  f"(다른 거래소 금고일 수 있음)")
+        return [], seen_h
+    scale = 10 ** token_decimals(chain_key, contract)
+    bals, _ = _balances(cfg["bal"], contract, [a for a, _ in cands])
+    out = [{"addr": a, "senders": len(s), "bal": bals.get(a, 0) / scale,
+            "gas": None if not feeders else False} for a, s in cands]
+    if feeders:
+        # 후보를 하나씩: 입금지갑 4곳을 고르게 뽑아(처음·중간·끝) 동시에 가스지갑 확인.
+        # 하나라도 맞으면 거기서 멈춘다(빗썸 가스지갑은 빗썸 입금주소에만 가스를 준다).
+        for c, (cand, ss) in zip(out, cands):
+            order = sorted(ss, key=lambda s: first.get((s, cand), 0))
+            pick = sorted({order[int(i * (len(order) - 1) / 3)] for i in range(4)})
+            with concurrent.futures.ThreadPoolExecutor(max_workers=4) as ex:
+                ok = list(ex.map(lambda s: _gas_funded(cfg["bal"], feeders, s,
+                                                       first[(s, cand)]), pick))
+            if any(ok):
+                c["gas"] = True
+                break
+    return out, seen_h
 
 
 @st.cache_data(ttl=60, show_spinner=False)
-def vault_stats(chain_key, contract, vault, hours):
-    """금고로 들어온/나간 기록 → 총입금·지갑 수·시간대별 유입·잔고"""
+def vault_flows(chain_key, contract, wallets, hours):
+    """빗썸 지갑들로 들어온/나간 기록 (빗썸 지갑끼리 옮긴 것은 뺀다)
+    → 총입금·지갑 수·시간대별 유입·나감, 실제로 본 시간"""
     cfg = ONCHAIN_CHAINS[chain_key]
-    rpcs = cfg["rpcs"]
     tip, now_ts, sec = _tip_now(chain_key)
     lo = max(0, tip - int(hours * 3600 / sec))
-    dec = _hexint(_rpc_call(rpcs, "eth_call", [{"to": contract, "data": "0x313ce567"},
-                                               "latest"])) or 18
-    scale = 10 ** dec
-    v = _topic_addr(vault)
-    deadline = time.time() + 60
-    ins = _get_logs(rpcs, contract, [TRANSFER_TOPIC, None, v], lo, tip, cfg["chunk"], deadline)
-    outs = _get_logs(rpcs, contract, [TRANSFER_TOPIC, v], lo, tip, cfg["chunk"], deadline)
-    bal = _hexint(_rpc_call(rpcs, "eth_call", [
-        {"to": contract, "data": "0x70a08231" + v[2:]}, "latest"])) / scale
+    scale = 10 ** token_decimals(chain_key, contract)
+    W = set(wallets)
+    tw = [_topic_addr(a) for a in wallets]
+    deadline = time.time() + 40
+    ins, lo_in = _get_logs(cfg["logs"], contract, [TRANSFER_TOPIC, None, tw], lo, tip,
+                           cfg["chunk"], deadline)
+    outs, lo_out = _get_logs(cfg["logs"], contract, [TRANSFER_TOPIC, tw], lo, tip,
+                             cfg["chunk"], max(deadline, time.time() + 20))
+    got_lo = max(lo_in, lo_out)
 
     def ts_of(bn):
         return now_ts - (tip - bn) * sec
 
-    rows, wallets = [], set()
+    rows, senders = [], set()
     for lg in ins:
         frm = "0x" + lg["topics"][1][-40:]
-        if frm == ZERO_ADDR:
+        bn = _hexint(lg["blockNumber"])
+        if frm == ZERO_ADDR or frm in W or bn < got_lo:
             continue
-        wallets.add(frm)
-        rows.append((ts_of(_hexint(lg["blockNumber"])), _hexint(lg["data"]) / scale))
-    out_sum = sum(_hexint(lg["data"]) / scale for lg in outs
-                  if "0x" + lg["topics"][2][-40:] != vault)
-    out_n = sum(1 for lg in outs if "0x" + lg["topics"][2][-40:] != vault)
+        senders.add(frm)
+        rows.append((ts_of(bn), _hexint(lg["data"]) / scale))
+    out_sum, out_n = 0.0, 0
+    for lg in outs:
+        to = "0x" + lg["topics"][2][-40:]
+        if to in W or _hexint(lg["blockNumber"]) < got_lo:
+            continue
+        out_sum += _hexint(lg["data"]) / scale
+        out_n += 1
     df = pd.DataFrame(rows, columns=["ts", "qty"])
     return {
         "in_sum": float(df["qty"].sum()) if len(df) else 0.0,
-        "in_n": len(df), "wallets": len(wallets),
-        "out_sum": out_sum, "out_n": out_n, "balance": bal,
+        "in_n": len(df), "wallets": len(senders),
+        "out_sum": out_sum, "out_n": out_n,
         "first_ts": float(df["ts"].min()) if len(df) else None,
         "last_ts": float(df["ts"].max()) if len(df) else None,
         "rows": rows, "asof": now_ts, "block": tip,
+        "seen_h": (tip - got_lo) * sec / 3600,
     }
 
 
@@ -532,17 +710,22 @@ def _kst(ts):
     return datetime.fromtimestamp(ts, KST).strftime("%m-%d %H:%M") if ts else "-"
 
 
+def _short(a):
+    return f"{a[:8]}…{a[-6:]}"
+
+
 def render_onchain(ticker, official_amount):
     st.markdown("---")
     st.subheader("⛓ 온체인 금고 (블록체인 직접 조회)")
     nets = bithumb_networks(ticker)
-    chain_key = next((n for n in nets if n in ONCHAIN_CHAINS), None)
-    if not chain_key:
-        st.caption(f"이 코인의 빗썸 입금망({', '.join(nets) or '확인 안 됨'})은 아직 온체인 금고 조회를 "
-                   f"지원하지 않습니다. 지원: "
+    chains = _chains_of(nets)
+    if not chains:
+        st.caption(f"이 코인의 빗썸 입금망({', '.join(nets) or '확인 안 됨'})은 EVM 체인이 아니라 "
+                   f"아직 온체인 조회를 지원하지 않습니다. 지원: "
                    + ", ".join(c["name"] for c in ONCHAIN_CHAINS.values()))
         return
-    cfg = ONCHAIN_CHAINS[chain_key]
+    t = ticker.upper()
+    first = ONCHAIN_CHAINS[chains[0]]
 
     o1, o2 = st.columns([1, 2])
     with o1:
@@ -550,89 +733,181 @@ def render_onchain(ticker, official_amount):
                              format_func=lambda h: f"최근 {h}시간", key="oc_hours")
     with o2:
         with st.expander("🔧 직접 입력 (자동으로 못 찾을 때)"):
+            st.caption(f"{first['name']} 기준으로 넣어 주세요.")
             m_contract = st.text_input("토큰 컨트랙트", key="oc_contract").strip().lower()
             m_vault = st.text_input("금고 주소", key="oc_vault").strip().lower()
+    m_contract = m_contract if m_contract.startswith("0x") and len(m_contract) == 42 else ""
+    m_vault = m_vault if m_vault.startswith("0x") and len(m_vault) == 42 else ""
+    off = official_amount or 0
 
     try:
-        if m_contract.startswith("0x") and len(m_contract) == 42:
-            contract, c_src = m_contract, "직접 입력"
-        else:
-            contract, c_src = token_contract(chain_key, ticker)
-        if not contract:
-            st.warning(f"⚠️ {cfg['name']}에서 {ticker} 컨트랙트를 못 찾았습니다. 위 '직접 입력'에 넣어 주세요.")
+        # ① 주소록: 빗썸이 받는 EVM 망마다, 빗썸 지갑 중 이 코인을 가진 곳을 전부 찾는다
+        per, errs = [], []
+        with st.spinner("📒 빗썸 지갑 주소록에서 이 코인 보유량 확인 중..."):
+            for ck in chains:
+                try:
+                    c = m_contract if (ck == chains[0] and m_contract) else token_contract(ck, t)
+                    if not c:
+                        continue
+                    extra = [m_vault] if (ck == chains[0] and m_vault) else []
+                    if (ck, t) in KNOWN_VAULTS:
+                        extra.append(KNOWN_VAULTS[(ck, t)])
+                    holders, n_book, n_miss = book_holders(ck, c, tuple(extra))
+                    per.append({"ck": ck, "contract": c, "holders": holders,
+                                "n_book": n_book, "n_miss": n_miss,
+                                "hot": sum(h[3] for h in holders if not h[2])})
+                except Exception as e:
+                    errs.append(f"{ONCHAIN_CHAINS[ck]['name']}: {e or type(e).__name__}")
+        if not per:
+            st.warning(f"⚠️ {t} 토큰 컨트랙트를 못 찾았습니다 (체인 기본 코인이거나 코인게코에 "
+                       f"주소가 없음). 위 '직접 입력'에 넣어 주세요."
+                       + (f" — {'; '.join(errs)}" if errs else ""))
             return
+        hot_sum = sum(p["hot"] for p in per)
+        main = max(per, key=lambda p: p["hot"])
+        ck, contract = main["ck"], main["contract"]
+        cfg = ONCHAIN_CHAINS[ck]
 
-        if m_vault.startswith("0x") and len(m_vault) == 42:
-            vault, v_src = m_vault, "직접 입력"
-        elif (chain_key, ticker.upper()) in KNOWN_VAULTS:
-            vault, v_src = KNOWN_VAULTS[(chain_key, ticker.upper())], "등록된 금고"
-        else:
-            # 금고 찾기는 최근 6시간만 본다(거래 많은 코인은 토큰 이동이 시간당 수천 건이라
-            # 길게 보면 느려진다). 못 찾으면 조회 기간 전체로 한 번 더.
-            with st.spinner("⛽ 빗썸 가스지갑으로 금고 찾는 중... (처음 한 번 30초~1분, 10분간 기억)"):
-                vault, v_src = find_vault(chain_key, contract, min(hours, 6))
-                if not vault and hours > 6:
-                    vault, v_src = find_vault(chain_key, contract, hours)
-        if not vault:
-            st.info(f"🔎 금고를 아직 못 찾았습니다 — {v_src}")
+        # ② 주소록으로 공개 숫자가 설명 안 되면 → 그 체인에서 새 금고 찾기
+        found, found_how = None, ""
+        gap_pct = (hot_sum / off - 1) * 100 if off else 0
+        need_find = (off > 0 and gap_pct < -MATCH_PCT) or (hot_sum == 0 and cfg.get("sweep_feeders"))
+        if need_find:
+            skip = tuple(h[0] for h in main["holders"])
+            with st.spinner("🔎 주소록에 없는 빗썸 금고 찾는 중... (처음 한 번 30초~1분, 5분간 기억)"):
+                h1 = min(hours, 6)
+                pool, seen1 = fanin_candidates(ck, contract, h1, skip)
+                pool = list(pool)
+                # 6시간을 다 읽었는데도 못 찾았을 때만 조회 기간 전체로 한 번 더
+                #   (6시간도 다 못 읽는 체인이면 길게 봐도 소용없고 느리기만 하다)
+                if hours > h1 and seen1 >= h1 * 0.97 and not any(c["gas"] for c in pool):
+                    more, _ = fanin_candidates(ck, contract, hours, skip)
+                    pool += [c for c in more if c["addr"] not in {p["addr"] for p in pool}]
+            for c in pool:
+                if c["gas"]:
+                    found, found_how = c, "빗썸 가스지갑 확인"
+                    break
+            if not found and off > 0:
+                # 잔고로 확인: 더하면 공개 숫자와 맞고(±5%), 원래 차이가 절반 이하로 줄어야 한다.
+                #   (ONDO 실측: 주소록 -5.8% 에 업비트 집금지갑을 더하니 -4.5% — 겨우 5% 안에
+                #    들어온 오탐. '크게 메워야' 진짜 빗썸 금고다)
+                for c in pool:
+                    after = abs((hot_sum + c["bal"]) / off - 1) * 100
+                    if c["bal"] > 0 and after <= MATCH_PCT and after <= abs(gap_pct) / 2:
+                        found, found_how = c, "더하면 빗썸 공개 숫자와 맞음"
+                        break
+
+        bal_of = {h[0]: h[3] for h in main["holders"] if not h[2]}
+        if found:
+            bal_of[found["addr"]] = found["bal"]
+            hot_sum += found["bal"]
+        if not bal_of:
+            book_at = load_book()[1]
+            st.info(f"🔎 {t}를 가진 빗썸 지갑을 아직 못 찾았습니다 "
+                    f"({', '.join(ONCHAIN_CHAINS[p['ck']]['name'] for p in per)} · 주소록 "
+                    f"{sum(p['n_book'] for p in per)}곳 조회"
+                    f"{f' · {book_at} 기준' if book_at else ''}). "
+                    f"아직 입금 전이거나, 새 금고라면 잠시 뒤 다시 보세요.")
             return
+        wallets = sorted(bal_of, key=lambda a: -bal_of[a])[:MAX_FLOW_WALLETS]
 
-        with st.spinner("금고 입출금 기록 읽는 중..."):
-            s = vault_stats(chain_key, contract, vault, hours)
+        with st.spinner("빗썸 지갑 입출금 기록 읽는 중..."):
+            s = vault_flows(ck, contract, tuple(wallets), hours)
     except Exception as e:
         st.error(f"온체인 조회 실패: {e}")
         return
 
-    price, p_src = _usd_price(ticker)
+    price, p_src = _usd_price(t)
     usdt_krw, _ = get_usdt_krw_price()
 
     def krw(q):
         return format_krw_short(q * price * usdt_krw) if price else "시세 없음"
 
-    st.markdown(f"🏦 **빗썸 금고** [`{vault[:8]}…{vault[-6:]}`]({cfg['explorer']}/address/{vault}) "
-                f"· {cfg['name']} · {v_src}")
+    multi = len(per) > 1
+    seen = s["seen_h"]
+    span_txt = f"{hours}h" if seen >= hours * 0.97 else f"실제 {seen:.1f}h"
+    n_hold = sum(1 for p in per for h in p["holders"] if not h[2]) + (1 if found else 0)
+    st.markdown(f"🏦 **빗썸 지갑 {n_hold}곳** · "
+                + " + ".join(ONCHAIN_CHAINS[p["ck"]]["name"] for p in per if p["hot"] > 0
+                             or p is main)
+                + (f" · 🆕 새 금고 [`{_short(found['addr'])}`]"
+                   f"({cfg['explorer']}/address/{found['addr']}) ({found_how})" if found else ""))
     m1, m2, m3, m4 = st.columns(4)
     with m1:
-        st.metric(f"총 입금 ({hours}h)", _fmt_qty(s["in_sum"]))
+        st.metric(f"총 입금 ({span_txt})", _fmt_qty(s["in_sum"]))
         st.caption(f"{krw(s['in_sum'])} · {s['in_n']}건")
     with m2:
         st.metric("입금한 지갑 수", f"{s['wallets']:,}곳")
         st.caption(f"첫 입금 {_kst(s['first_ts'])} · 마지막 {_kst(s['last_ts'])}")
     with m3:
-        st.metric("금고 현재 잔고", _fmt_qty(s["balance"]))
-        st.caption(krw(s["balance"]))
+        st.metric("빗썸 지갑 보유 합계", _fmt_qty(hot_sum))
+        st.caption(krw(hot_sum) + (" · " + " / ".join(
+            f"{ONCHAIN_CHAINS[p['ck']]['name']} {_fmt_qty(p['hot'] + (found['bal'] if found and p is main else 0))}"
+            for p in per) if multi else ""))
     with m4:
-        st.metric(f"금고에서 나감 ({hours}h)", _fmt_qty(s["out_sum"]))
+        st.metric(f"빗썸 밖으로 나감 ({span_txt})", _fmt_qty(s["out_sum"]))
         st.caption(f"{krw(s['out_sum'])} · {s['out_n']}건")
 
-    # 빗썸 공개 숫자와 비교 — 공개 숫자 = 금고 잔고(입금 − 출금) 인지 확인
-    if official_amount and s["balance"] > 0:
-        diff = (official_amount / s["balance"] - 1) * 100
-        if abs(diff) <= 3:
-            st.success(f"✅ 빗썸 공개 숫자 {_fmt_qty(official_amount)} ≈ 금고 잔고 "
-                       f"{_fmt_qty(s['balance'])} ({diff:+.1f}%) → 공개 숫자는 "
+    # 빗썸 공개 숫자와 비교 — 공개 숫자 = 빗썸 지갑 잔고 합(입금 − 출금) 인지 확인
+    if off and hot_sum > 0:
+        diff = (off / hot_sum - 1) * 100
+        if abs(diff) <= MATCH_PCT:
+            st.success(f"✅ 빗썸 공개 숫자 {_fmt_qty(off)} ≈ 빗썸 지갑 보유 합계 "
+                       f"{_fmt_qty(hot_sum)} ({diff:+.1f}%) → 공개 숫자는 "
                        f"'들어온 것 − 나간 것'입니다. 실제 들어온 양은 위 '총 입금'을 보세요.")
+        elif hot_sum < off * 0.5:
+            st.info(f"ℹ️ 주소록에서 찾은 빗썸 지갑은 공개 숫자 {_fmt_qty(off)}의 "
+                    f"{hot_sum / off * 100:.0f}%({_fmt_qty(hot_sum)})만 들고 있습니다. 나머지는 아직 "
+                    f"주소록에 없는 빗썸 지갑에 있어서, 위 입출금 숫자도 찾은 지갑 기준입니다.")
         else:
-            st.info(f"ℹ️ 빗썸 공개 숫자 {_fmt_qty(official_amount)} vs 금고 잔고 "
-                    f"{_fmt_qty(s['balance'])} ({diff:+.1f}%) — 공개 숫자는 10분쯤마다 갱신돼 "
-                    f"늦을 수 있고, 금고가 여러 개일 수도 있습니다.")
+            st.info(f"ℹ️ 빗썸 공개 숫자 {_fmt_qty(off)} vs 빗썸 지갑 보유 합계 "
+                    f"{_fmt_qty(hot_sum)} ({diff:+.1f}%) — 공개 숫자는 10분쯤마다 갱신돼 늦을 수 "
+                    f"있고, 주소록에 없는 빗썸 지갑이 더 있을 수도 있습니다.")
+    if seen < hours * 0.97:
+        st.caption(f"⚠️ 무료 RPC가 옛 기록을 다 안 줘서 입출금은 최근 {seen:.1f}시간만 셌습니다 "
+                   f"(보유 합계는 지금 잔고라 정확).")
+    if multi:
+        st.caption(f"ℹ️ 보유 합계는 빗썸이 받는 망 {len(per)}개를 다 더한 값이고, "
+                   f"입출금은 가장 많이 들고 있는 {cfg['name']} 기준입니다.")
 
     if s["rows"]:
         df = pd.DataFrame(s["rows"], columns=["ts", "qty"])
         df["시각"] = pd.to_datetime(df["ts"], unit="s", utc=True).dt.tz_convert(KST) \
                      .dt.floor("10min").dt.tz_localize(None)
-        per = df.groupby("시각")["qty"].sum()
+        per10 = df.groupby("시각")["qty"].sum()
         ch1, ch2 = st.columns(2)
         with ch1:
             st.caption("10분마다 들어온 양")
-            st.bar_chart(per.rename("입금량"))
+            st.bar_chart(per10.rename("입금량"))
         with ch2:
             st.caption("누적 입금")
-            st.line_chart(per.cumsum().rename("누적"))
+            st.line_chart(per10.cumsum().rename("누적"))
+
+    n_list = sum(len(p["holders"]) for p in per) + (1 if found else 0)
+    with st.expander(f"📒 빗썸 지갑 목록 ({n_list}곳)"):
+        lines = []
+        if found:
+            lines.append(f"- 🆕 [`{_short(found['addr'])}`]({cfg['explorer']}/address/"
+                         f"{found['addr']}) 새 금고 ({found_how}, 입금지갑 {found['senders']}곳)"
+                         f" — **{_fmt_qty(found['bal'])}** ({krw(found['bal'])})")
+        for p in per:
+            pc = ONCHAIN_CHAINS[p["ck"]]
+            for a, lab, cold, q in p["holders"][:30]:
+                lines.append(f"- {'🧊 ' if cold else ''}{pc['name'] + ' · ' if multi else ''}"
+                             f"[`{_short(a)}`]({pc['explorer']}/address/{a})"
+                             f" {lab or '빗썸'} — **{_fmt_qty(q)}** ({krw(q)})"
+                             + (" · 콜드라 합계 제외" if cold else ""))
+        st.markdown("\n".join(lines) or "(없음)")
+        book_at = load_book()[1]
+        n_miss = sum(p["n_miss"] for p in per)
+        st.caption(f"주소록 {sum(p['n_book'] for p in per)}곳 조회"
+                   + (f" · {book_at} 기준" if book_at else "")
+                   + (f" · {n_miss}곳은 RPC가 답을 안 줌" if n_miss else "")
+                   + (f" · 조회 실패: {'; '.join(errs)}" if errs else ""))
 
     st.caption(f"⏱ 블록 {s['block']:,} 기준 · {_kst(s['asof'])} KST · 1분마다 새로 읽음"
                + (f" · 시세 {p_src} ${price:,.6f}" if price else ""))
-    st.caption("ℹ️ 개인 입금주소는 표시하지 않습니다. 금고 주소만 보여줍니다.")
+    st.caption("ℹ️ 개인 입금주소는 표시하지 않습니다. 빗썸 거래소 지갑만 보여줍니다.")
 
 
 # 자동 새로고침 '1초 틱'은 화면을 다 그린 뒤 맨 아래에서 한다 (2026.10 수정)
@@ -845,10 +1120,9 @@ else:
 
 st.markdown("---")
 st.caption("💡 빗썸 입금 누적 데이터 + CEX(Binance/Bybit/OKX/Gate/MEXC) USDT 시세 + DexScreener DEX 폴백")
-st.caption("⛓ 온체인 금고: 빗썸 가스지갑으로 찾은 금고의 입출금을 블록체인에서 직접 조회 (현재 Robinhood Chain)")
+st.caption("⛓ 온체인 금고: 빗썸 지갑(주소록 + 새 금고 자동 찾기)의 입출금을 블록체인에서 직접 조회 — EVM 체인 전부")
 st.caption("⚠️ 정보는 참고용이며, 정확한 정보는 각 거래소 공식 사이트 확인.")
 
 if _tick_after_render:
     time.sleep(1)
     st.rerun()
-
