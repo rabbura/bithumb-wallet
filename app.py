@@ -13,7 +13,8 @@ st.set_page_config(
     layout="wide"
 )
 
-st.title("🏦 빗썸 핫월렛 잔액 조회 대시보드")
+st.title("🏦 업비트 금고 온체인 조회 대시보드" if st.session_state.get("ex_mode") == "업비트"
+         else "🏦 빗썸 핫월렛 잔액 조회 대시보드")
 st.markdown("---")
 
 if 'coin_data' not in st.session_state:
@@ -271,12 +272,12 @@ ONCHAIN_CHAINS = {
             "sec": 0.75,
             "logs": ["https://bsc-rpc.publicnode.com", "https://bsc.rpc.blxrbdn.com"],
             "bal": ["https://bsc-rpc.publicnode.com", "https://bsc.rpc.blxrbdn.com"],
-            "explorer": "https://bscscan.com", "chunk": 5_000},
+            "explorer": "https://bscscan.com", "chunk": 5_000, "slow": True},
     "BASE_ETH": {"book": "base", "name": "Base", "cg": ["base"], "sec": 2,
                  # 텐더리는 1천 블록씩이지만 옛 구간도 준다(공개노드는 최근만) → 텐더리 먼저
                  "logs": [TENDERLY.format("base"), "https://base-rpc.publicnode.com"],
                  "bal": ["https://base-rpc.publicnode.com", "https://mainnet.base.org"],
-                 "explorer": "https://basescan.org", "chunk": 1_000},
+                 "explorer": "https://basescan.org", "chunk": 1_000, "slow": True},
     "ARB_ETH": {"book": "arbitrum-one", "name": "Arbitrum", "cg": ["arbitrum-one"], "sec": 0.25,
                 "logs": ["https://arb1.arbitrum.io/rpc", TENDERLY.format("arbitrum")],
                 "bal": ["https://arbitrum-one.public.blastapi.io", "https://arb1.arbitrum.io/rpc"],
@@ -430,11 +431,15 @@ def _load_book_raw():
         return {}
 
 
-def load_book():
-    """빗썸 지갑 주소록 (app.py 옆 bithumb_wallets.json) → (체인별 [주소, 라벨, 콜드], 기준시각).
-    파일이 없으면 빈 목록 — 그래도 새 금고 찾기는 돈다."""
+EXCHANGES = {"bithumb": {"name": "빗썸", "key": "chains"},
+             "upbit": {"name": "업비트", "key": "upbit"}}
+
+
+def load_book(ex="bithumb"):
+    """거래소 지갑 주소록 (app.py 옆 bithumb_wallets.json) → (체인별 [주소, 라벨, 콜드], 기준시각).
+    빗썸 = "chains", 업비트 = "upbit". 파일이 없으면 빈 목록 — 그래도 빗썸 새 금고 찾기는 돈다."""
     d = _load_book_raw()
-    return d.get("chains", {}), d.get("_at", "")
+    return d.get(EXCHANGES[ex]["key"], {}), d.get("_at", "")
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
@@ -550,10 +555,10 @@ def _balances(rpcs, contract, addrs, batch=100):
 
 
 @st.cache_data(ttl=60, show_spinner=False)
-def book_holders(chain_key, contract, extra=()):
-    """주소록의 빗썸 지갑 중 이 코인을 가진 곳 → ([(주소, 라벨, 콜드, 수량)], 조회 수, 못 읽은 수)"""
+def book_holders(chain_key, contract, extra=(), ex="bithumb"):
+    """주소록의 거래소 지갑 중 이 코인을 가진 곳 → ([(주소, 라벨, 콜드, 수량)], 조회 수, 못 읽은 수)"""
     cfg = ONCHAIN_CHAINS[chain_key]
-    book, _ = load_book()
+    book, _ = load_book(ex)
     rows = {a: (lab, cold) for a, lab, cold in book.get(cfg["book"], [])}
     for a in extra:
         rows.setdefault(a.lower(), ("등록/직접 입력 금고", False))
@@ -645,15 +650,34 @@ def fanin_candidates(chain_key, contract, hours, skip=()):
     return out, seen_h
 
 
+def vault_flows(chain_key, contract, wallets, hours, ex="bithumb"):
+    """느린 체인(BSC·베이스: 한 번 읽는 데 30초~2분)은 5분, 나머지는 1분마다 새로 읽는다.
+    (자동 새로고침을 켜도 느린 체인이 계속 '읽는 중'에 머물지 않게)"""
+    if ONCHAIN_CHAINS[chain_key].get("slow"):
+        return _vault_flows_slow(chain_key, contract, wallets, hours, ex)
+    return _vault_flows_fast(chain_key, contract, wallets, hours, ex)
+
+
 @st.cache_data(ttl=60, show_spinner=False)
-def vault_flows(chain_key, contract, wallets, hours):
-    """빗썸 지갑들로 들어온/나간 기록 (빗썸 지갑끼리 옮긴 것은 뺀다)
+def _vault_flows_fast(chain_key, contract, wallets, hours, ex):
+    return _vault_flows(chain_key, contract, wallets, hours, ex)
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def _vault_flows_slow(chain_key, contract, wallets, hours, ex):
+    return _vault_flows(chain_key, contract, wallets, hours, ex)
+
+
+def _vault_flows(chain_key, contract, wallets, hours, ex):
+    """거래소 지갑들로 들어온/나간 기록 (그 거래소 지갑끼리 옮긴 것은 뺀다)
     → 총입금·지갑 수·시간대별 유입·나감, 실제로 본 시간"""
     cfg = ONCHAIN_CHAINS[chain_key]
     tip, now_ts, sec = _tip_now(chain_key)
     lo = max(0, tip - int(hours * 3600 / sec))
     scale = 10 ** token_decimals(chain_key, contract)
-    W = set(wallets)
+    # 내부 이동 = 주소록의 그 거래소 지갑 전부(콜드 포함). 조회하는 상위 20곳끼리만 빼면
+    #   콜드→핫 보충이 '총 입금'으로 잡혀 오래된 코인의 입금이 부풀었다 (10/9 리뷰)
+    W = set(wallets) | {r[0] for r in load_book(ex)[0].get(cfg["book"], [])}
     tw = [_topic_addr(a) for a in wallets]
     deadline = time.time() + 40
     ins, lo_in = _get_logs(cfg["logs"], contract, [TRANSFER_TOPIC, None, tw], lo, tip,
@@ -714,16 +738,27 @@ def _short(a):
     return f"{a[:8]}…{a[-6:]}"
 
 
-def render_onchain(ticker, official_amount):
+def render_onchain(ticker, official_amount, ex="bithumb"):
+    """ex: "bithumb" = 빗썸 (공개 숫자 비교 + 새 금고 찾기) / "upbit" = 업비트 (주소록만)"""
+    X = EXCHANGES[ex]["name"]
     st.markdown("---")
-    st.subheader("⛓ 온체인 금고 (블록체인 직접 조회)")
-    nets = bithumb_networks(ticker)
-    chains = _chains_of(nets)
-    if not chains:
-        st.caption(f"이 코인의 빗썸 입금망({', '.join(nets) or '확인 안 됨'})은 EVM 체인이 아니라 "
-                   f"아직 온체인 조회를 지원하지 않습니다. 지원: "
-                   + ", ".join(c["name"] for c in ONCHAIN_CHAINS.values()))
-        return
+    st.subheader(f"⛓ {X} 온체인 금고 (블록체인 직접 조회)")
+    if ex == "bithumb":
+        nets = bithumb_networks(ticker)
+        chains = _chains_of(nets)
+        if not chains:
+            st.caption(f"이 코인의 빗썸 입금망({', '.join(nets) or '확인 안 됨'})은 EVM 체인이 아니라 "
+                       f"아직 온체인 조회를 지원하지 않습니다. 지원: "
+                       + ", ".join(c["name"] for c in ONCHAIN_CHAINS.values()))
+            return
+    else:
+        # 업비트는 입금망 공개 API가 없다 → 주소록에 업비트 지갑이 있는 EVM 체인을 전부 본다
+        ubook = load_book(ex)[0]
+        chains = [k for k, c in ONCHAIN_CHAINS.items() if ubook.get(c["book"])]
+        if not chains:
+            st.warning("⚠️ 주소록에 업비트 지갑이 없습니다. export_bithumb_wallets.py 로 "
+                       "bithumb_wallets.json 을 새로 만들어 GitHub에 올려 주세요.")
+            return
     t = ticker.upper()
     first = ONCHAIN_CHAINS[chains[0]]
 
@@ -741,23 +776,23 @@ def render_onchain(ticker, official_amount):
     off = official_amount or 0
 
     try:
-        # ① 주소록: 빗썸이 받는 EVM 망마다, 빗썸 지갑 중 이 코인을 가진 곳을 전부 찾는다
+        # ① 주소록: EVM 망마다, 그 거래소 지갑 중 이 코인을 가진 곳을 전부 찾는다
         per, errs = [], []
-        with st.spinner("📒 빗썸 지갑 주소록에서 이 코인 보유량 확인 중..."):
+        with st.spinner(f"📒 {X} 지갑 주소록에서 이 코인 보유량 확인 중..."):
             for ck in chains:
                 try:
                     c = m_contract if (ck == chains[0] and m_contract) else token_contract(ck, t)
                     if not c:
                         continue
                     extra = [m_vault] if (ck == chains[0] and m_vault) else []
-                    if (ck, t) in KNOWN_VAULTS:
+                    if ex == "bithumb" and (ck, t) in KNOWN_VAULTS:
                         extra.append(KNOWN_VAULTS[(ck, t)])
-                    holders, n_book, n_miss = book_holders(ck, c, tuple(extra))
+                    holders, n_book, n_miss = book_holders(ck, c, tuple(extra), ex)
                     per.append({"ck": ck, "contract": c, "holders": holders,
                                 "n_book": n_book, "n_miss": n_miss,
                                 "hot": sum(h[3] for h in holders if not h[2])})
                 except Exception as e:
-                    errs.append(f"{ONCHAIN_CHAINS[ck]['name']}: {e or type(e).__name__}")
+                    errs.append(f"{ONCHAIN_CHAINS[ck]['name']}: {str(e) or type(e).__name__}")
         if not per:
             st.warning(f"⚠️ {t} 토큰 컨트랙트를 못 찾았습니다 (체인 기본 코인이거나 코인게코에 "
                        f"주소가 없음). 위 '직접 입력'에 넣어 주세요."
@@ -771,7 +806,9 @@ def render_onchain(ticker, official_amount):
         # ② 주소록으로 공개 숫자가 설명 안 되면 → 그 체인에서 새 금고 찾기
         found, found_how = None, ""
         gap_pct = (hot_sum / off - 1) * 100 if off else 0
-        need_find = (off > 0 and gap_pct < -MATCH_PCT) or (hot_sum == 0 and cfg.get("sweep_feeders"))
+        # 업비트는 공개 숫자도 가스지갑도 없어 확인할 방법이 없다 → 찾지 않는다 (오탐 방지)
+        need_find = ex == "bithumb" and (
+            (off > 0 and gap_pct < -MATCH_PCT) or (hot_sum == 0 and cfg.get("sweep_feeders")))
         if need_find:
             skip = tuple(h[0] for h in main["holders"])
             with st.spinner("🔎 주소록에 없는 빗썸 금고 찾는 중... (처음 한 번 30초~1분, 5분간 기억)"):
@@ -802,17 +839,19 @@ def render_onchain(ticker, official_amount):
             bal_of[found["addr"]] = found["bal"]
             hot_sum += found["bal"]
         if not bal_of:
-            book_at = load_book()[1]
-            st.info(f"🔎 {t}를 가진 빗썸 지갑을 아직 못 찾았습니다 "
+            book_at = load_book(ex)[1]
+            st.info(f"🔎 {t}를 가진 {X} 지갑을 아직 못 찾았습니다 "
                     f"({', '.join(ONCHAIN_CHAINS[p['ck']]['name'] for p in per)} · 주소록 "
                     f"{sum(p['n_book'] for p in per)}곳 조회"
                     f"{f' · {book_at} 기준' if book_at else ''}). "
-                    f"아직 입금 전이거나, 새 금고라면 잠시 뒤 다시 보세요.")
+                    + ("아직 입금 전이거나, 새 금고라면 잠시 뒤 다시 보세요." if ex == "bithumb" else
+                       "업비트 신규 상장 금고는 상장추적봇이 찾아 주소록에 넣은 뒤, "
+                       "bithumb_wallets.json 을 새로 올려야 보입니다."))
             return
         wallets = sorted(bal_of, key=lambda a: -bal_of[a])[:MAX_FLOW_WALLETS]
 
-        with st.spinner("빗썸 지갑 입출금 기록 읽는 중..."):
-            s = vault_flows(ck, contract, tuple(wallets), hours)
+        with st.spinner(f"{X} 지갑 입출금 기록 읽는 중..."):
+            s = vault_flows(ck, contract, tuple(wallets), hours, ex)
     except Exception as e:
         st.error(f"온체인 조회 실패: {e}")
         return
@@ -827,7 +866,8 @@ def render_onchain(ticker, official_amount):
     seen = s["seen_h"]
     span_txt = f"{hours}h" if seen >= hours * 0.97 else f"실제 {seen:.1f}h"
     n_hold = sum(1 for p in per for h in p["holders"] if not h[2]) + (1 if found else 0)
-    st.markdown(f"🏦 **빗썸 지갑 {n_hold}곳** · "
+    cold_sum = sum(h[3] for p in per for h in p["holders"] if h[2])
+    st.markdown(f"🏦 **{X} 지갑 {n_hold}곳** · "
                 + " + ".join(ONCHAIN_CHAINS[p["ck"]]["name"] for p in per if p["hot"] > 0
                              or p is main)
                 + (f" · 🆕 새 금고 [`{_short(found['addr'])}`]"
@@ -840,12 +880,13 @@ def render_onchain(ticker, official_amount):
         st.metric("입금한 지갑 수", f"{s['wallets']:,}곳")
         st.caption(f"첫 입금 {_kst(s['first_ts'])} · 마지막 {_kst(s['last_ts'])}")
     with m3:
-        st.metric("빗썸 지갑 보유 합계", _fmt_qty(hot_sum))
+        st.metric(f"{X} 지갑 보유 합계", _fmt_qty(hot_sum))
         st.caption(krw(hot_sum) + (" · " + " / ".join(
             f"{ONCHAIN_CHAINS[p['ck']]['name']} {_fmt_qty(p['hot'] + (found['bal'] if found and p is main else 0))}"
-            for p in per) if multi else ""))
+            for p in per) if multi else "")
+            + (f" · 🧊 콜드 {_fmt_qty(cold_sum)} 별도" if cold_sum else ""))
     with m4:
-        st.metric(f"빗썸 밖으로 나감 ({span_txt})", _fmt_qty(s["out_sum"]))
+        st.metric(f"{X} 밖으로 나감 ({span_txt})", _fmt_qty(s["out_sum"]))
         st.caption(f"{krw(s['out_sum'])} · {s['out_n']}건")
 
     # 빗썸 공개 숫자와 비교 — 공개 숫자 = 빗썸 지갑 잔고 합(입금 − 출금) 인지 확인
@@ -863,11 +904,15 @@ def render_onchain(ticker, official_amount):
             st.info(f"ℹ️ 빗썸 공개 숫자 {_fmt_qty(off)} vs 빗썸 지갑 보유 합계 "
                     f"{_fmt_qty(hot_sum)} ({diff:+.1f}%) — 공개 숫자는 10분쯤마다 갱신돼 늦을 수 "
                     f"있고, 주소록에 없는 빗썸 지갑이 더 있을 수도 있습니다.")
+    if ex == "upbit":
+        st.caption("ℹ️ 업비트는 빗썸의 '입금 누적' 같은 공개 숫자가 없어서, 상장추적봇이 확인해 "
+                   "주소록에 넣은 업비트 지갑만 셉니다 (콜드 제외). 신규 상장 금고는 상장추적봇이 "
+                   "찾은 뒤 주소록을 새로 올려야 보입니다.")
     if seen < hours * 0.97:
         st.caption(f"⚠️ 무료 RPC가 옛 기록을 다 안 줘서 입출금은 최근 {seen:.1f}시간만 셌습니다 "
                    f"(보유 합계는 지금 잔고라 정확).")
     if multi:
-        st.caption(f"ℹ️ 보유 합계는 빗썸이 받는 망 {len(per)}개를 다 더한 값이고, "
+        st.caption(f"ℹ️ 보유 합계는 {X} 지갑이 있는 망 {len(per)}개를 다 더한 값이고, "
                    f"입출금은 가장 많이 들고 있는 {cfg['name']} 기준입니다.")
 
     if s["rows"]:
@@ -884,7 +929,7 @@ def render_onchain(ticker, official_amount):
             st.line_chart(per10.cumsum().rename("누적"))
 
     n_list = sum(len(p["holders"]) for p in per) + (1 if found else 0)
-    with st.expander(f"📒 빗썸 지갑 목록 ({n_list}곳)"):
+    with st.expander(f"📒 {X} 지갑 목록 ({n_list}곳)"):
         lines = []
         if found:
             lines.append(f"- 🆕 [`{_short(found['addr'])}`]({cfg['explorer']}/address/"
@@ -895,19 +940,73 @@ def render_onchain(ticker, official_amount):
             for a, lab, cold, q in p["holders"][:30]:
                 lines.append(f"- {'🧊 ' if cold else ''}{pc['name'] + ' · ' if multi else ''}"
                              f"[`{_short(a)}`]({pc['explorer']}/address/{a})"
-                             f" {lab or '빗썸'} — **{_fmt_qty(q)}** ({krw(q)})"
+                             f" {lab or X} — **{_fmt_qty(q)}** ({krw(q)})"
                              + (" · 콜드라 합계 제외" if cold else ""))
         st.markdown("\n".join(lines) or "(없음)")
-        book_at = load_book()[1]
+        book_at = load_book(ex)[1]
         n_miss = sum(p["n_miss"] for p in per)
         st.caption(f"주소록 {sum(p['n_book'] for p in per)}곳 조회"
                    + (f" · {book_at} 기준" if book_at else "")
                    + (f" · {n_miss}곳은 RPC가 답을 안 줌" if n_miss else "")
                    + (f" · 조회 실패: {'; '.join(errs)}" if errs else ""))
 
-    st.caption(f"⏱ 블록 {s['block']:,} 기준 · {_kst(s['asof'])} KST · 1분마다 새로 읽음"
+    st.caption(f"⏱ 블록 {s['block']:,} 기준 · {_kst(s['asof'])} KST · "
+               f"{'5분' if ONCHAIN_CHAINS[ck].get('slow') else '1분'}마다 새로 읽음"
                + (f" · 시세 {p_src} ${price:,.6f}" if price else ""))
-    st.caption("ℹ️ 개인 입금주소는 표시하지 않습니다. 빗썸 거래소 지갑만 보여줍니다.")
+    st.caption(f"ℹ️ 개인 입금주소는 표시하지 않습니다. {X} 거래소 지갑만 보여줍니다.")
+
+
+@st.cache_data(ttl=300)
+def upbit_symbols():
+    """업비트 상장 코인 (KRW·BTC·USDT 마켓 전부). 실패하면 None → 아무 티커나 받는다."""
+    try:
+        r = requests.get("https://api.upbit.com/v1/market/all", timeout=8)
+        if r.status_code == 200:
+            return frozenset(m["market"].split("-", 1)[1] for m in r.json())
+    except Exception:
+        pass
+    return None
+
+
+def render_upbit_page():
+    """🟦 업비트 모드 (2026.10.09 추가) — 업비트는 공개 '입금 누적'이 없어서 ⛓ 온체인 칸만 보여준다.
+    빗썸 화면 코드는 건드리지 않고, 여기서 다 그린 뒤 st.stop() 한다."""
+    with st.sidebar:
+        st.header("🔍 코인 검색")
+        syms = upbit_symbols()
+        t = st.text_input("코인 티커 입력 (예: ONDO, ENA)", placeholder="ONDO",
+                          key="up_ticker").strip().upper()
+        if t and syms is not None and t not in syms:
+            st.error(f"❌ 업비트에 {t} 코인이 없습니다.")
+            similar = sorted(x for x in syms if t in x)
+            if similar:
+                st.info(f"💡 혹시 이 코인? {', '.join(similar[:5])}")
+            t = ""
+        elif t:
+            st.success(f"✅ {t}")
+        st.markdown("---")
+        auto = st.checkbox("자동 새로고침 (1분마다 새 숫자)", key="up_auto")
+    if t:
+        render_onchain(t, 0, ex="upbit")
+    else:
+        st.info("👈 왼쪽에 업비트 코인 티커를 넣으세요.")
+        st.markdown("업비트 거래소 지갑(상장추적봇·복제핫·현선봇 주소록)이 블록체인에서 들고 있는 양과 "
+                    "최근 입출금을 보여줍니다. 업비트는 빗썸처럼 '입금 누적' 공개 숫자가 없어서 "
+                    "온체인 숫자만 나옵니다.")
+    st.markdown("---")
+    st.caption("⛓ 업비트 금고: 주소록의 업비트 지갑 입출금을 블록체인에서 직접 조회 — EVM 체인")
+    st.caption("⚠️ 정보는 참고용이며, 정확한 정보는 각 거래소 공식 사이트 확인.")
+    if t and auto:
+        time.sleep(15)      # 숫자는 1분(느린 체인 5분)마다 새로 읽힌다 — 15초마다 화면만 다시 그림
+        st.rerun()
+
+
+# 거래소 고르기 (2026.10.09) — 빗썸이 기본. 업비트를 고르면 업비트 화면만 그리고 끝낸다.
+with st.sidebar:
+    ex_mode = st.radio("거래소", ["빗썸", "업비트"], horizontal=True, key="ex_mode")
+if ex_mode == "업비트":
+    render_upbit_page()
+    st.stop()
 
 
 # 자동 새로고침 '1초 틱'은 화면을 다 그린 뒤 맨 아래에서 한다 (2026.10 수정)
